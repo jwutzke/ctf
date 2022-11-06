@@ -284,6 +284,7 @@ index 35c08f6..fc51ec0 100755
 +consul kv put whackywidget/db/mysql_pw $MYSQL_PASSWORD
 ```
 That token will be useful later. 
+
 3. I have never seen consul before so I dive into the documentation to see what is possible. I try a few commands such as `consul acl token list` but get:
 ```
 developer@ambassador:/opt/my-app$ consul acl token list
@@ -309,7 +310,9 @@ Policies:
    00000000-0000-0000-0000-000000000001 - global-management
 ```
 Looks like this token provides us with greater permissions.
+
 4. Checking the consul configuration in `/etc/consul.d/config.d` shows a setting `enable_script_checks` is enabled. The word `script` in this setting piques my interest. Checking google it seems it allows for periodic health checks to be run, which include the ability to execute scripts/applications on the server AS ROOT!
+
 5. After some googling, I found a valid format for the health check settings and used the following saved as check.json:
 ```
 {
